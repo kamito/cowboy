@@ -16,7 +16,15 @@
 -module(http_SUITE).
 -compile(export_all).
 
--include_lib("common_test/include/ct.hrl").
+-import(cowboy_test, [config/2]).
+-import(cowboy_test, [gun_open/1]).
+-import(cowboy_test, [gun_monitor_open/1]).
+-import(cowboy_test, [gun_monitor_open/2]).
+-import(cowboy_test, [gun_is_gone/2]).
+-import(cowboy_test, [raw_open/1]).
+-import(cowboy_test, [raw_send/2]).
+-import(cowboy_test, [raw_recv_head/1]).
+-import(cowboy_test, [raw_expect_recv/2]).
 
 %% ct.
 
@@ -34,69 +42,10 @@ all() ->
 	].
 
 groups() ->
-	Tests = [
-		check_raw_status,
-		check_status,
-		chunked_response,
-		echo_body,
-		echo_body_max_length,
-		echo_body_qs,
-		echo_body_qs_max_length,
-		error_chain_handle_after_reply,
-		error_chain_handle_before_reply,
-		error_handle_after_reply,
-		error_init_after_reply,
-		error_init_reply_handle_error,
-		headers_dupe,
-		http10_chunkless,
-		http10_hostless,
-		keepalive_max,
-		keepalive_nl,
-		keepalive_stream_loop,
-		multipart,
-		multipart_large,
-		nc_rand,
-		nc_zero,
-		pipeline,
-		pipeline_long_polling,
-		rest_bad_accept,
-		rest_bad_content_type,
-		rest_expires,
-		rest_keepalive,
-		rest_keepalive_post,
-		rest_missing_get_callbacks,
-		rest_missing_put_callbacks,
-		rest_nodelete,
-		rest_options_default,
-		rest_param_all,
-		rest_patch,
-		rest_post_charset,
-		rest_postonly,
-		rest_resource_etags,
-		rest_resource_etags_if_none_match,
-		set_resp_body,
-		set_resp_header,
-		set_resp_overwrite,
-		slowloris,
-		slowloris2,
-		static_attribute_etag,
-		static_function_etag,
-		static_mimetypes_function,
-		static_specify_file,
-		static_specify_file_catchall,
-		static_test_file,
-		static_test_file_css,
-		stream_body_set_resp,
-		stream_body_set_resp_close,
-		stream_body_set_resp_chunked,
-		stream_body_set_resp_chunked10,
-		streamed_response,
-		te_chunked,
-		te_chunked_chopped,
-		te_chunked_delayed,
-		te_chunked_split_body,
-		te_chunked_split_crlf,
-		te_identity
+	Tests = cowboy_test:all(?MODULE) -- [
+		onrequest, onrequest_reply, onrequest_hook,
+		onresponse_crash, onresponse_reply, onresponse_capitalize,
+		parse_host, set_env_dispatch
 	],
 	[
 		{http, [parallel], Tests},
@@ -123,124 +72,83 @@ groups() ->
 	].
 
 init_per_suite(Config) ->
-	application:start(crypto),
-	application:start(asn1),
-	application:start(public_key),
-	application:start(ssl),
-	application:start(ranch),
-	application:start(cowlib),
-	application:start(gun),
-	application:start(cowboy),
-	Dir = ?config(priv_dir, Config) ++ "/static",
+	Dir = config(priv_dir, Config) ++ "/static",
 	ct_helper:create_static_dir(Dir),
 	[{static_dir, Dir}|Config].
 
 end_per_suite(Config) ->
-	Dir = ?config(static_dir, Config),
-	ct_helper:delete_static_dir(Dir),
-	application:stop(cowboy),
-	application:stop(gun),
-	application:stop(cowlib),
-	application:stop(ranch),
-	application:stop(ssl),
-	application:stop(public_key),
-	application:stop(asn1),
-	application:stop(crypto),
-	ok.
+	ct_helper:delete_static_dir(config(static_dir, Config)).
 
-init_tcp_group(Ref, ProtoOpts, Config) ->
-	Transport = ranch_tcp,
-	{ok, _} = cowboy:start_http(Ref, 100, [{port, 0}], [
+init_per_group(Name = http, Config) ->
+	cowboy_test:init_http(Name, [
+		{env, [{dispatch, init_dispatch(Config)}]}
+	], Config);
+init_per_group(Name = https, Config) ->
+	cowboy_test:init_https(Name, [
+		{env, [{dispatch, init_dispatch(Config)}]}
+	], Config);
+init_per_group(Name = http_compress, Config) ->
+	cowboy_test:init_http(Name, [
 		{env, [{dispatch, init_dispatch(Config)}]},
-		{max_keepalive, 50},
-		{timeout, 500}
-		|ProtoOpts]),
-	Port = ranch:get_port(Ref),
-	[{type, tcp}, {port, Port}, {opts, []}, {transport, Transport}|Config].
-
-init_ssl_group(Ref, ProtoOpts, Config) ->
-	Transport = ranch_ssl,
-	{_, Cert, Key} = ct_helper:make_certs(),
-	Opts = [{cert, Cert}, {key, Key}],
-	{ok, _} = cowboy:start_https(Ref, 100, Opts ++ [{port, 0}], [
+		{compress, true}
+	], Config);
+init_per_group(Name = https_compress, Config) ->
+	cowboy_test:init_https(Name, [
 		{env, [{dispatch, init_dispatch(Config)}]},
-		{max_keepalive, 50},
-		{timeout, 500}
-		|ProtoOpts]),
-	Port = ranch:get_port(Ref),
-	[{type, ssl}, {port, Port}, {opts, Opts}, {transport, Transport}|Config].
-
-init_per_group(http, Config) ->
-	init_tcp_group(http, [], Config);
-init_per_group(https, Config) ->
-	init_ssl_group(https, [], Config);
-init_per_group(http_compress, Config) ->
-	init_tcp_group(http_compress, [{compress, true}], Config);
-init_per_group(https_compress, Config) ->
-	init_ssl_group(https_compress, [{compress, true}], Config);
+		{compress, true}
+	], Config);
 %% Most, if not all of these, should be in separate test suites.
 init_per_group(onrequest, Config) ->
-	Transport = ranch_tcp,
 	{ok, _} = cowboy:start_http(onrequest, 100, [{port, 0}], [
 		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
-		{onrequest, fun onrequest_hook/1},
+		{onrequest, fun do_onrequest_hook/1},
 		{timeout, 500}
 	]),
 	Port = ranch:get_port(onrequest),
-	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
-		{transport, Transport}|Config];
+	[{type, tcp}, {port, Port}, {opts, []}|Config];
 init_per_group(onresponse, Config) ->
-	Transport = ranch_tcp,
 	{ok, _} = cowboy:start_http(onresponse, 100, [{port, 0}], [
 		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
-		{onresponse, fun onresponse_hook/4},
+		{onresponse, fun do_onresponse_hook/4},
 		{timeout, 500}
 	]),
 	Port = ranch:get_port(onresponse),
-	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
-		{transport, Transport}|Config];
+	[{type, tcp}, {port, Port}, {opts, []}|Config];
 init_per_group(onresponse_capitalize, Config) ->
-	Transport = ranch_tcp,
 	{ok, _} = cowboy:start_http(onresponse_capitalize, 100, [{port, 0}], [
 		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
-		{onresponse, fun onresponse_capitalize_hook/4},
+		{onresponse, fun do_onresponse_capitalize_hook/4},
 		{timeout, 500}
 	]),
 	Port = ranch:get_port(onresponse_capitalize),
-	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
-		{transport, Transport}|Config];
+	[{type, tcp}, {port, Port}, {opts, []}|Config];
 init_per_group(parse_host, Config) ->
-	Transport = ranch_tcp,
 	Dispatch = cowboy_router:compile([
 		{'_', [
 			{"/req_attr", http_req_attr, []}
 		]}
 	]),
-	{ok, _} = cowboy:start_http(http, 100, [{port, 0}], [
+	{ok, _} = cowboy:start_http(parse_host, 100, [{port, 0}], [
 		{env, [{dispatch, Dispatch}]},
 		{max_keepalive, 50},
 		{timeout, 500}
 	]),
-	Port = ranch:get_port(http),
-	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
-		{transport, Transport}|Config];
+	Port = ranch:get_port(parse_host),
+	[{type, tcp}, {port, Port}, {opts, []}|Config];
 init_per_group(set_env, Config) ->
-	Transport = ranch_tcp,
 	{ok, _} = cowboy:start_http(set_env, 100, [{port, 0}], [
 		{env, [{dispatch, []}]},
 		{max_keepalive, 50},
 		{timeout, 500}
 	]),
 	Port = ranch:get_port(set_env),
-	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
-		{transport, Transport}|Config].
+	[{type, tcp}, {port, Port}, {opts, []}|Config].
 
 end_per_group(Name, _) ->
-	cowboy:stop_listener(Name),
-	ok.
+	ok = cowboy:stop_listener(Name).
 
 %% Dispatch configuration.
 
@@ -250,7 +158,6 @@ init_dispatch(Config) ->
 			{"/chunked_response", http_chunked, []},
 			{"/streamed_response", http_streamed, []},
 			{"/init_shutdown", http_init_shutdown, []},
-			{"/long_polling", http_long_polling, []},
 			{"/headers/dupe", http_handler,
 				[{headers, [{<<"connection">>, <<"close">>}]}]},
 			{"/set_resp/header", http_set_resp,
@@ -270,18 +177,18 @@ init_dispatch(Config) ->
 					{reply, set_resp_chunked},
 					{body, [<<"stream_body">>, <<"_set_resp_chunked">>]}]},
 			{"/static/[...]", cowboy_static,
-				{dir, ?config(static_dir, Config)}},
+				{dir, config(static_dir, Config)}},
 			{"/static_mimetypes_function/[...]", cowboy_static,
-				{dir, ?config(static_dir, Config),
-					[{mimetypes, ?MODULE, mimetypes_text_html}]}},
+				{dir, config(static_dir, Config),
+					[{mimetypes, ?MODULE, do_mimetypes_text_html}]}},
 			{"/handler_errors", http_errors, []},
 			{"/static_attribute_etag/[...]", cowboy_static,
-				{dir, ?config(static_dir, Config)}},
+				{dir, config(static_dir, Config)}},
 			{"/static_function_etag/[...]", cowboy_static,
-				{dir, ?config(static_dir, Config),
-					[{etag, ?MODULE, etag_gen}]}},
+				{dir, config(static_dir, Config),
+					[{etag, ?MODULE, do_etag_gen}]}},
 			{"/static_specify_file/[...]", cowboy_static,
-				{file, ?config(static_dir, Config) ++ "/style.css"}},
+				{file, config(static_dir, Config) ++ "/style.css"}},
 			{"/multipart", http_multipart, []},
 			{"/multipart/large", http_multipart_stream, []},
 			{"/echo/body", http_echo_body, []},
@@ -301,82 +208,22 @@ init_dispatch(Config) ->
 			{"/resetags", rest_resource_etags, []},
 			{"/rest_expires", rest_expires, []},
 			{"/rest_empty_resource", rest_empty_resource, []},
-			{"/loop_recv", http_loop_recv, []},
 			{"/loop_stream_recv", http_loop_stream_recv, []},
-			{"/loop_timeout", http_loop_timeout, []},
 			{"/", http_handler, []}
 		]}
 	]).
 
-etag_gen(_, _, _) ->
+%% Callbacks.
+
+do_etag_gen(_, _, _) ->
 	{strong, <<"etag">>}.
 
-mimetypes_text_html(_) ->
+do_mimetypes_text_html(_) ->
 	<<"text/html">>.
-
-%% Support functions for testing using Gun.
-
-gun_open(Config) ->
-	gun_open(Config, []).
-
-gun_open(Config, Opts) ->
-	{_, Port} = lists:keyfind(port, 1, Config),
-	{_, Type} = lists:keyfind(type, 1, Config),
-	{ok, ConnPid} = gun:open("localhost", Port, [{retry, 0}, {type, Type}|Opts]),
-	ConnPid.
-
-gun_monitor_open(Config) ->
-	gun_monitor_open(Config, []).
-
-gun_monitor_open(Config, Opts) ->
-	ConnPid = gun_open(Config, Opts),
-	{ConnPid, monitor(process, ConnPid)}.
-
-gun_is_gone(ConnPid) ->
-	gun_is_gone(ConnPid, monitor(process, ConnPid)).
-
-gun_is_gone(ConnPid, MRef) ->
-	receive {'DOWN', MRef, process, ConnPid, gone} -> ok
-	after 500 -> error(timeout) end.
-
-%% Support functions for testing using a raw socket.
-
-raw_open(Config) ->
-	{_, Port} = lists:keyfind(port, 1, Config),
-	{_, Type} = lists:keyfind(type, 1, Config),
-	Transport = case Type of
-		tcp -> gen_tcp;
-		ssl -> ssl
-	end,
-	{_, Opts} = lists:keyfind(opts, 1, Config),
-	{ok, Socket} = Transport:connect("localhost", Port,
-		[binary, {active, false}, {packet, raw},
-			{reuseaddr, true}, {nodelay, true}|Opts]),
-	{raw_client, Socket, Transport}.
-
-raw_send({raw_client, Socket, Transport}, Data) ->
-	Transport:send(Socket, Data).
-
-raw_recv_head({raw_client, Socket, Transport}) ->
-	{ok, Data} = Transport:recv(Socket, 0, 5000),
-	raw_recv_head(Socket, Transport, Data).
-
-raw_recv_head(Socket, Transport, Buffer) ->
-	case binary:match(Buffer, <<"\r\n\r\n">>) of
-		nomatch ->
-			{ok, Data} = Transport:recv(Socket, 0, 5000),
-			raw_recv_head(Socket, Transport, << Buffer/binary, Data/binary >>);
-		{_, _} ->
-			Buffer
-	end.
-
-raw_expect_recv({raw_client, Socket, Transport}, Expect) ->
-	{ok, Expect} = Transport:recv(Socket, iolist_size(Expect), 5000),
-	ok.
 
 %% Convenience functions.
 
-quick_raw(Data, Config) ->
+do_raw(Data, Config) ->
 	Client = raw_open(Config),
 	ok = raw_send(Client, Data),
 	case catch raw_recv_head(Client) of
@@ -384,7 +231,7 @@ quick_raw(Data, Config) ->
 		Resp -> element(2, cow_http:parse_status_line(Resp))
 	end.
 
-quick_get(Path, Config) ->
+do_get(Path, Config) ->
 	ConnPid = gun_open(Config),
 	Ref = gun:get(ConnPid, Path),
 	{response, _, Status, _} = gun:await(ConnPid, Ref),
@@ -416,14 +263,10 @@ The document has moved
 <A HREF=\"http://www.google.co.il/\">here</A>.
 </BODY></HTML>",
 	Tests = [
-		{102, <<"GET /long_polling HTTP/1.1\r\nHost: localhost\r\n"
-			"Content-Length: 5000\r\n\r\n", 0:5000/unit:8 >>},
 		{200, ["GET / HTTP/1.0\r\nHost: localhost\r\n"
 			"Set-Cookie: ", HugeCookie, "\r\n\r\n"]},
 		{200, "\r\n\r\n\r\n\r\n\r\nGET / HTTP/1.1\r\nHost: localhost\r\n\r\n"},
 		{200, "GET http://proxy/ HTTP/1.1\r\nHost: localhost\r\n\r\n"},
-		{200, <<"POST /loop_recv HTTP/1.1\r\nHost: localhost\r\n"
-			"Content-Length: 100000\r\n\r\n", 0:100000/unit:8 >>},
 		{400, "\n"},
 		{400, "Garbage\r\n\r\n"},
 		{400, "\r\n\r\n\r\n\r\n\r\n\r\n"},
@@ -437,8 +280,6 @@ The document has moved
 		{408, "GET / HTTP/1.1\r\nHost: localhost\r\n\r"},
 		{414, Huge},
 		{400, "GET / HTTP/1.1\r\n" ++ Huge},
-		{500, <<"GET /long_polling HTTP/1.1\r\nHost: localhost\r\n"
-			"Content-Length: 100000\r\n\r\n", 0:100000/unit:8 >>},
 		{505, "GET / HTTP/1.2\r\nHost: localhost\r\n\r\n"},
 		{closed, ""},
 		{closed, "\r\n"},
@@ -446,17 +287,15 @@ The document has moved
 		{closed, "GET / HTTP/1.1"}
 	],
 	_ = [{Status, Packet} = begin
-		Ret = quick_raw(Packet, Config),
+		Ret = do_raw(Packet, Config),
 		{Ret, Packet}
 	end || {Status, Packet} <- Tests],
 	ok.
 
 check_status(Config) ->
 	Tests = [
-		{102, "/long_polling"},
 		{200, "/"},
 		{200, "/simple"},
-		{204, "/loop_timeout"},
 		{400, "/static/%2f"},
 		{400, "/static/%2e"},
 		{400, "/static/%2e%2e"},
@@ -470,7 +309,7 @@ check_status(Config) ->
 		{666, "/init_shutdown"}
 	],
 	_ = [{Status, URL} = begin
-		Ret = quick_get(URL, Config),
+		Ret = do_get(URL, Config),
 		{Ret, URL}
 	end || {Status, URL} <- Tests].
 
@@ -566,19 +405,23 @@ http10_chunkless(Config) ->
 	gun_is_gone(ConnPid, MRef).
 
 http10_hostless(Config) ->
-	Port10 = ?config(port, Config) + 10,
-	Name = list_to_atom("http10_hostless_" ++ integer_to_list(Port10)),
-	ranch:start_listener(Name, 5,
-		?config(transport, Config), ?config(opts, Config) ++ [{port, Port10}],
+	Name = http10_hostless,
+	Port10 = config(port, Config) + 10,
+	Transport = case config(type, Config) of
+		tcp -> ranch_tcp;
+		ssl -> ranch_ssl
+	end,
+	ranch:start_listener(Name, 5, Transport,
+		config(opts, Config) ++ [{port, Port10}],
 		cowboy_protocol, [
 			{env, [{dispatch, cowboy_router:compile([
 				{'_', [{"/http1.0/hostless", http_handler, []}]}])}]},
 			{max_keepalive, 50},
 			{timeout, 500}]
 	),
-	200 = quick_raw("GET /http1.0/hostless HTTP/1.0\r\n\r\n",
+	200 = do_raw("GET /http1.0/hostless HTTP/1.0\r\n\r\n",
 		[{port, Port10}|Config]),
-	cowboy:stop_listener(http10).
+	cowboy:stop_listener(http10_hostless).
 
 keepalive_max(Config) ->
 	{ConnPid, MRef} = gun_monitor_open(Config),
@@ -642,6 +485,28 @@ multipart(Config) ->
 	],
 	ok.
 
+multipart_chunked(Config) ->
+	ConnPid = gun_open(Config),
+	Body = <<
+		"This is a preamble."
+		"\r\n--OHai\r\nX-Name:answer\r\n\r\n42"
+		"\r\n--OHai\r\nServer:Cowboy\r\n\r\nIt rocks!\r\n"
+		"\r\n--OHai--\r\n"
+		"This is an epilogue."
+	>>,
+	Ref = gun:post(ConnPid, "/multipart", [
+		{<<"content-type">>, <<"multipart/x-makes-no-sense; boundary=OHai">>},
+		{<<"transfer-encoding">>, <<"chunked">>}]),
+	gun:data(ConnPid, Ref, fin, Body),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, RespBody} = gun:await_body(ConnPid, Ref),
+	Parts = binary_to_term(RespBody),
+	Parts = [
+		{[{<<"x-name">>, <<"answer">>}], <<"42">>},
+		{[{<<"server">>, <<"Cowboy">>}], <<"It rocks!\r\n">>}
+	],
+	ok.
+
 multipart_large(Config) ->
 	ConnPid = gun_open(Config),
 	Boundary = "----------",
@@ -656,7 +521,7 @@ multipart_large(Config) ->
 	{response, fin, 200, _} = gun:await(ConnPid, Ref),
 	ok.
 
-nc_reqs(Config, Input) ->
+do_nc(Config, Input) ->
 	Cat = os:find_executable("cat"),
 	Nc = os:find_executable("nc"),
 	case {Cat, Nc} of
@@ -666,18 +531,17 @@ nc_reqs(Config, Input) ->
 			{skip, {notfound, nc}};
 		_Good ->
 			%% Throw garbage at the server then check if it's still up.
-			{port, Port} = lists:keyfind(port, 1, Config),
-			StrPort = integer_to_list(Port),
+			StrPort = integer_to_list(config(port, Config)),
 			[os:cmd("cat " ++ Input ++ " | nc localhost " ++ StrPort)
 				|| _ <- lists:seq(1, 100)],
-			200 = quick_get("/", Config)
+			200 = do_get("/", Config)
 	end.
 
 nc_rand(Config) ->
-	nc_reqs(Config, "/dev/urandom").
+	do_nc(Config, "/dev/urandom").
 
 nc_zero(Config) ->
-	nc_reqs(Config, "/dev/zero").
+	do_nc(Config, "/dev/zero").
 
 onrequest(Config) ->
 	ConnPid = gun_open(Config),
@@ -696,7 +560,7 @@ onrequest_reply(Config) ->
 	ok.
 
 %% Hook for the above onrequest tests.
-onrequest_hook(Req) ->
+do_onrequest_hook(Req) ->
 	case cowboy_req:qs_val(<<"reply">>, Req) of
 		{undefined, Req2} ->
 			cowboy_req:set_resp_header(<<"server">>, <<"Serenity">>, Req2);
@@ -714,7 +578,7 @@ onresponse_capitalize(Config) ->
 	ok.
 
 %% Hook for the above onresponse_capitalize test.
-onresponse_capitalize_hook(Status, Headers, Body, Req) ->
+do_onresponse_capitalize_hook(Status, Headers, Body, Req) ->
 	Headers2 = [{cowboy_bstr:capitalize_token(N), V}
 		|| {N, V} <- Headers],
 	{ok, Req2} = cowboy_req:reply(Status, Headers2, Body, Req),
@@ -734,7 +598,7 @@ onresponse_reply(Config) ->
 	ok.
 
 %% Hook for the above onresponse tests.
-onresponse_hook(_, Headers, _, Req) ->
+do_onresponse_hook(_, Headers, _, Req) ->
 	{ok, Req2} = cowboy_req:reply(
 		<<"777 Lucky">>, [{<<"x-hook">>, <<"onresponse">>}|Headers], Req),
 	Req2.
@@ -763,12 +627,6 @@ pipeline(Config) ->
 	ConnPid = gun_open(Config),
 	Refs = [gun:get(ConnPid, "/") || _ <- lists:seq(1, 5)],
 	_ = [{response, nofin, 200, _} = gun:await(ConnPid, Ref) || Ref <- Refs],
-	ok.
-
-pipeline_long_polling(Config) ->
-	ConnPid = gun_open(Config),
-	Refs = [gun:get(ConnPid, "/long_polling") || _ <- lists:seq(1, 2)],
-	_ = [{response, fin, 102, _} = gun:await(ConnPid, Ref) || Ref <- Refs],
 	ok.
 
 rest_param_all(Config) ->
@@ -1117,9 +975,9 @@ te_chunked(Config) ->
 	{ok, Body} = gun:await_body(ConnPid, Ref),
 	ok.
 
-body_to_chunks(_, <<>>, Acc) ->
+do_body_to_chunks(_, <<>>, Acc) ->
 	lists:reverse([<<"0\r\n\r\n">>|Acc]);
-body_to_chunks(ChunkSize, Body, Acc) ->
+do_body_to_chunks(ChunkSize, Body, Acc) ->
 	BodySize = byte_size(Body),
 	ChunkSize2 = case BodySize < ChunkSize of
 		true -> BodySize;
@@ -1127,12 +985,12 @@ body_to_chunks(ChunkSize, Body, Acc) ->
 	end,
 	<< Chunk:ChunkSize2/binary, Rest/binary >> = Body,
 	ChunkSizeBin = list_to_binary(integer_to_list(ChunkSize2, 16)),
-	body_to_chunks(ChunkSize, Rest,
+	do_body_to_chunks(ChunkSize, Rest,
 		[<< ChunkSizeBin/binary, "\r\n", Chunk/binary, "\r\n" >>|Acc]).
 
 te_chunked_chopped(Config) ->
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	Body2 = iolist_to_binary(body_to_chunks(50, Body, [])),
+	Body2 = iolist_to_binary(do_body_to_chunks(50, Body, [])),
 	ConnPid = gun_open(Config),
 	Ref = gun:post(ConnPid, "/echo/body",
 		[{<<"transfer-encoding">>, <<"chunked">>}]),
@@ -1146,7 +1004,7 @@ te_chunked_chopped(Config) ->
 
 te_chunked_delayed(Config) ->
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	Chunks = body_to_chunks(50, Body, []),
+	Chunks = do_body_to_chunks(50, Body, []),
 	ConnPid = gun_open(Config),
 	Ref = gun:post(ConnPid, "/echo/body",
 		[{<<"transfer-encoding">>, <<"chunked">>}]),
@@ -1160,7 +1018,7 @@ te_chunked_delayed(Config) ->
 
 te_chunked_split_body(Config) ->
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	Chunks = body_to_chunks(50, Body, []),
+	Chunks = do_body_to_chunks(50, Body, []),
 	ConnPid = gun_open(Config),
 	Ref = gun:post(ConnPid, "/echo/body",
 		[{<<"transfer-encoding">>, <<"chunked">>}]),
@@ -1184,7 +1042,7 @@ te_chunked_split_body(Config) ->
 
 te_chunked_split_crlf(Config) ->
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	Chunks = body_to_chunks(50, Body, []),
+	Chunks = do_body_to_chunks(50, Body, []),
 	ConnPid = gun_open(Config),
 	Ref = gun:post(ConnPid, "/echo/body",
 		[{<<"transfer-encoding">>, <<"chunked">>}]),

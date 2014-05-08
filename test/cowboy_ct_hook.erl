@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2014, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2014, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -12,11 +12,12 @@
 %% ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
--module(eunit_SUITE).
--compile(export_all).
+-module(cowboy_ct_hook).
 
-all() ->
-	[eunit].
+-export([init/2]).
 
-eunit(_) ->
-	ok = eunit:test({application, cowboy}).
+init(_, _) ->
+	cowboy_test:start([cowboy, gun]),
+	cowboy_test:make_certs(),
+	error_logger:add_report_handler(cowboy_error_h),
+	{ok, undefined}.
