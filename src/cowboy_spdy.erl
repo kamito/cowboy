@@ -279,28 +279,32 @@ handle_frame(State=#state{socket=Socket, transport=Transport},
 	State;
 %% Data received for a stream.
 handle_frame(State, {data, StreamID, IsFin, Data}) ->
-	Child = #child{input=nofin, in_buffer=Buffer, is_recv=IsRecv}
-		= get_child(StreamID, State),
-	Data2 = << Buffer/binary, Data/binary >>,
-	IsFin2 = if IsFin -> fin; true -> nofin end,
-	Child2 = case IsRecv of
-		{active, FromSocket, FromPid} ->
-			FromPid ! {spdy, FromSocket, Data},
-			Child#child{input=IsFin2, is_recv=false};
-		{passive, FromSocket, FromPid, 0, TRef} ->
-			FromPid ! {recv, FromSocket, {ok, Data2}},
-			cancel_recv_timeout(StreamID, TRef),
-			Child#child{input=IsFin2, in_buffer= <<>>, is_recv=false};
-		{passive, FromSocket, FromPid, Length, TRef}
-				when byte_size(Data2) >= Length ->
-			<< Data3:Length/binary, Rest/binary >> = Data2,
-			FromPid ! {recv, FromSocket, {ok, Data3}},
-			cancel_recv_timeout(StreamID, TRef),
-			Child#child{input=IsFin2, in_buffer=Rest, is_recv=false};
-		_ ->
-			Child#child{input=IsFin2, in_buffer=Data2}
-	end,
-	replace_child(Child2, State);
+    case get_child(StreamID, State) of
+        false ->
+            State;
+        Child0 ->
+            Child = #child{input=nofin, in_buffer=Buffer, is_recv=IsRecv} = Child0,
+            Data2 = << Buffer/binary, Data/binary >>,
+            IsFin2 = if IsFin -> fin; true -> nofin end,
+            Child2 = case IsRecv of
+                         {active, FromSocket, FromPid} ->
+                             FromPid ! {spdy, FromSocket, Data},
+                             Child#child{input=IsFin2, is_recv=false};
+                         {passive, FromSocket, FromPid, 0, TRef} ->
+                             FromPid ! {recv, FromSocket, {ok, Data2}},
+                             cancel_recv_timeout(StreamID, TRef),
+                             Child#child{input=IsFin2, in_buffer= <<>>, is_recv=false};
+                         {passive, FromSocket, FromPid, Length, TRef}
+                           when byte_size(Data2) >= Length ->
+                             << Data3:Length/binary, Rest/binary >> = Data2,
+                             FromPid ! {recv, FromSocket, {ok, Data3}},
+                             cancel_recv_timeout(StreamID, TRef),
+                             Child#child{input=IsFin2, in_buffer=Rest, is_recv=false};
+                         _ ->
+                             Child#child{input=IsFin2, in_buffer=Data2}
+                     end,
+            replace_child(Child2, State)
+    end;
 %% General error, can't recover.
 handle_frame(State, {error, badprotocol}) ->
 	goaway(State, protocol_error),
